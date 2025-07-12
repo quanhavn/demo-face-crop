@@ -1,0 +1,8 @@
+Flask
+numpy<2
+Pillow
+opencv-python
+rembg
+mediapipe
+onnxruntime
+git+https://github.com/wiktorlazarski/head-segmentation.git 
