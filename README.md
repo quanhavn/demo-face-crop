@@ -15,6 +15,9 @@ pip install flask opencv-python pillow rembg mediapipe numpy onnxruntime
 pip install flask opencv-python pillow rembg mediapipe numpy onnxruntime-silicon
 ```
 
+## Run:
 ```
 python app.py
 ```
+
+access: http://0.0.0.0:8888/
