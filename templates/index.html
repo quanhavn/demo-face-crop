@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Passport Photo Processor</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      max-width: 600px;
+      margin: 30px auto;
+    }
+    label, input, select {
+      display: block;
+      margin-top: 15px;
+    }
+    button {
+      margin-top: 20px;
+      padding: 10px 20px;
+    }
+    .preview-row {
+      display: flex;
+      flex-direction: row;
+      justify-content: center;
+      align-items: flex-start;
+      gap: 20px;
+      margin-top: 30px;
+    }
+    .preview-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 180px;
+    }
+    .preview-col img {
+      margin-top: 10px;
+      max-width: 100%;
+      border: 1px solid #ccc;
+      background: #f9f9f9;
+      min-height: 180px;
+      object-fit: contain;
+    }
+  </style>
+</head>
+<body>
+  <h1>🛂 Passport Photo Upload</h1>
+  <form id="uploadForm">
+    <label>Upload Image:</label>
+    <input type="file" name="image" id="imageInput" accept="image/*" required />
+
+    <label>Ratio (top:face:bottom):</label>
+    <input type="text" name="ratio" value="10:39:11" />
+
+    <label>Output ratio (width:height, ví dụ 3:4, 4:6, 1:1):</label>
+    <input type="text" name="output_ratio" value="2:3" />
+
+    <label>Output height (pixel, ví dụ 709):</label>
+    <input type="number" name="output_height" value="709" min="100" />
+
+    <label>Background color (R,G,B):</label>
+    <input type="text" name="background_color" value="255,255,255" />
+
+    <label>Show bounding box:</label>
+    <input type="checkbox" name="show_bbox" id="show_bbox" />
+
+    <button type="submit">Submit</button>
+  </form>
+
+  <div class="preview-row">
+    <div class="preview-col" id="previewBefore">
+      <span>Ảnh gốc (Before)</span>
+      <img id="beforeImage" src="" alt="Original preview" />
+    </div>
+    <div class="preview-col" id="previewBbox" style="display:none;">
+      <span>Ảnh có bounding box</span>
+      <img id="bboxImage" src="" alt="Bounding box preview" />
+    </div>
+    <div class="preview-col" id="result" style="display:none;">
+      <span>✅ Processed (After)</span>
+      <img id="resultImage" src="" alt="Processed result" />
+    </div>
+  </div>
+
+  <script>
+    // Preview ảnh gốc khi chọn file
+    document.getElementById("imageInput").addEventListener("change", function (e) {
+      const file = e.target.files[0];
+      if (file) {
+        const url = URL.createObjectURL(file);
+        document.getElementById("beforeImage").src = url;
+      }
+    });
+    document.getElementById("uploadForm").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      const formData = new FormData(this);
+      // Nếu checkbox không được check thì không gửi lên
+      if (!document.getElementById("show_bbox").checked) {
+        formData.delete("show_bbox");
+      }
+      const res = await fetch("/process-passport", {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        alert("❌ Failed to process image. Ensure face is visible.");
+        return;
+      }
+      // Nếu có bounding box, server trả về JSON chứa 2 ảnh: bbox và result
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await res.json();
+        if (data.bbox_image) {
+          document.getElementById("bboxImage").src = data.bbox_image;
+          document.getElementById("previewBbox").style.display = 'block';
+        } else {
+          document.getElementById("previewBbox").style.display = 'none';
+        }
+        document.getElementById("resultImage").src = data.result_image;
+        document.getElementById("result").style.display = 'block';
+      } else {
+        // Trường hợp chỉ trả về ảnh kết quả
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        document.getElementById("resultImage").src = url;
+        document.getElementById("result").style.display = 'block';
+        document.getElementById("previewBbox").style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
+
