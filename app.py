@@ -8,10 +8,14 @@ from rembg import remove
 from base64 import b64encode
 from PIL import ImageDraw
 import math
+import head_segmentation.segmentation_pipeline as seg_pipeline
 
 app = Flask(__name__)
 
 mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True)
+
+# Khởi tạo pipeline segmentation (chỉ khởi tạo 1 lần)
+segmentation_pipeline = seg_pipeline.HumanHeadSegmentationPipeline()
 
 def detect_face_landmarks(image):
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -19,6 +23,18 @@ def detect_face_landmarks(image):
     if not results.multi_face_landmarks:
         return None
     return results.multi_face_landmarks[0]
+
+def get_head_mask_and_bbox(image_pil):
+    # image_pil: PIL Image RGB
+    segmentation_map = segmentation_pipeline.predict(np.array(image_pil))
+    mask = segmentation_map.astype(np.uint8)
+    ys, xs = np.where(mask == 1)
+    if len(xs) == 0 or len(ys) == 0:
+        return None, None
+    x_min, x_max = xs.min(), xs.max()
+    y_min, y_max = ys.min(), ys.max()
+    bbox = (x_min, y_min, x_max, y_max)
+    return mask, bbox
 
 def get_head_chin_landmarks(landmarks, image_shape):
     h, w = image_shape[:2]
@@ -94,10 +110,36 @@ def align_face(image, head, chin):
     angle = math.degrees(math.atan2(dx, dy))
     img_center = (image.width // 2, image.height // 2)
     rotated_img = image.rotate(-angle, resample=Image.BICUBIC, center=img_center, expand=True)
+    # Tính lại vị trí head, chin sau khi xoay
     angle_rad = math.radians(angle)
-    head_rot = rotate_point(head[0], head[1], *img_center, -angle_rad)
-    chin_rot = rotate_point(chin[0], chin[1], *img_center, -angle_rad)
+    def rotate_point(x, y):
+        cos_a = math.cos(-angle_rad)
+        sin_a = math.sin(-angle_rad)
+        x_new = cos_a * (x - img_center[0]) - sin_a * (y - img_center[1]) + img_center[0]
+        y_new = sin_a * (x - img_center[0]) + cos_a * (y - img_center[1]) + img_center[1]
+        return int(x_new), int(y_new)
+    head_rot = rotate_point(*head)
+    chin_rot = rotate_point(*chin)
     return rotated_img, head_rot, chin_rot
+
+def get_head_chin_from_mask(mask):
+    # mask: numpy array nhị phân
+    ys, xs = np.where(mask == 1)
+    if len(xs) == 0 or len(ys) == 0:
+        return None, None
+    # Tìm contour ngoài cùng
+    import cv2
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None
+    contour = max(contours, key=cv2.contourArea)
+    # Điểm cao nhất (đỉnh đầu)
+    top_idx = np.argmin(contour[:, 0, 1])
+    head = tuple(contour[top_idx, 0])
+    # Điểm thấp nhất (cằm)
+    bot_idx = np.argmax(contour[:, 0, 1])
+    chin = tuple(contour[bot_idx, 0])
+    return head, chin
 
 @app.route('/')
 def index():
@@ -114,17 +156,22 @@ def process_passport():
     show_bbox = request.form.get('show_bbox', None)
 
     image_pil = Image.open(file).convert("RGB")
-    image = np.array(image_pil)
-
-    landmarks = detect_face_landmarks(image)
-    if landmarks is None:
-        return {"error": "Face not detected"}, 400
-
-    # Lấy head, chin, contour_points, x_center, y_center
-    head, chin, contour_points, x_center, y_center = get_face_center_landmarks(landmarks, image.shape)
+    # Sử dụng segmentation để lấy bbox vùng đầu
+    mask, bbox = get_head_mask_and_bbox(image_pil)
+    if bbox is None:
+        return {"error": "Head not detected"}, 400
+    x_min, y_min, x_max, y_max = bbox
+    # head: đỉnh đầu (bao gồm tóc), chin: cằm (dưới cùng vùng đầu)
+    head = ( (x_min + x_max) // 2, y_min )
+    chin = ( (x_min + x_max) // 2, y_max )
+    # Để căn crop ngang tốt hơn, lấy contour ngoài cùng của mask
+    contour_points = [(x, y) for y in range(mask.shape[0]) for x in range(mask.shape[1]) if mask[y, x] == 1]
+    if contour_points:
+        x_center = int(sum([p[0] for p in contour_points]) / len(contour_points))
+    else:
+        x_center = (x_min + x_max) // 2
     bg_color = tuple(map(int, bg_color_str.strip().split(',')))
     ratio = tuple(map(int, ratio_str.strip().split(':')))
-
     # Xử lý output_size
     if output_size_str:
         output_size = tuple(map(int, output_size_str.strip().split('x')))
@@ -135,11 +182,10 @@ def process_passport():
         output_size = (out_w, out_h)
     else:
         output_size = (472, 709)  # mặc định 40x60mm
-
     image_with_bg = apply_background(image_pil, color=bg_color)
     # Xoay ảnh cho thẳng khuôn mặt
     image_with_bg, head, chin = align_face(image_with_bg, head, chin)
-    # Sau khi xoay, cũng cần xoay lại toàn bộ contour để lấy trung tâm mới
+    # Sau khi xoay, cũng cần xoay lại x_center
     img_center = (image_with_bg.width // 2, image_with_bg.height // 2)
     dx = chin[0] - head[0]
     dy = chin[1] - head[1]
@@ -151,20 +197,15 @@ def process_passport():
         x_new = cos_a * (x - img_center[0]) - sin_a * (y - img_center[1]) + img_center[0]
         y_new = sin_a * (x - img_center[0]) + cos_a * (y - img_center[1]) + img_center[1]
         return int(x_new), int(y_new)
-    contour_points_rot = [rotate_point(*pt) for pt in contour_points]
-    x_center = int(sum([p[0] for p in contour_points_rot]) / len(contour_points_rot))
-    # Truyền x_center vào crop_by_ratio
-    final_crop = crop_by_ratio(image_with_bg, head=head, chin=chin, ratio=ratio, output_size=output_size, x_center=x_center)
-
+    x_center_rot = rotate_point(x_center, head[1])[0]
+    final_crop = crop_by_ratio(image_with_bg, head=head, chin=chin, ratio=ratio, output_size=output_size, x_center=x_center_rot)
     buf = BytesIO()
     final_crop.save(buf, format='JPEG')
     buf.seek(0)
-
     if show_bbox is not None:
         bbox_img = image_with_bg.copy()
         draw = ImageDraw.Draw(bbox_img)
-        # Vẽ bounding box crop lên ảnh
-        # Tính lại crop_top, crop_bottom, crop_width như trong crop_by_ratio
+        # Vẽ bounding box crop lên ảnh (màu xanh lá)
         top, face, bottom = ratio
         total = top + face + bottom
         out_w, out_h = output_size
@@ -176,14 +217,25 @@ def process_passport():
         crop_bottom = int(chin[1] + bottom_px)
         crop_height = crop_bottom - crop_top
         crop_width = int(out_w / out_h * crop_height)
-        crop_left = max(0, x_center - crop_width // 2)
-        crop_right = min(bbox_img.width, x_center + crop_width // 2)
+        crop_left = x_center_rot - crop_width // 2
+        crop_right = x_center_rot + crop_width // 2
+        if crop_left < 0:
+            crop_right += -crop_left
+            crop_left = 0
+        if crop_right > bbox_img.width:
+            diff = crop_right - bbox_img.width
+            crop_left -= diff
+            crop_right = bbox_img.width
+            if crop_left < 0:
+                crop_left = 0
         if crop_right - crop_left < crop_width:
             if crop_left > 0:
                 crop_left -= 1
             elif crop_right < bbox_img.width:
                 crop_right += 1
         draw.rectangle([crop_left, crop_top, crop_right, crop_bottom], outline=(0,255,0), width=3)
+        # Vẽ bounding box detect head_segmentation (màu đỏ)
+        draw.rectangle([x_min, y_min, x_max, y_max], outline=(255,0,0), width=3)
         bbox_buf = BytesIO()
         bbox_img.save(bbox_buf, format='JPEG')
         bbox_buf.seek(0)
